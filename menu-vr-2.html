@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Menu VR - Hand Tracking</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#000000">
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #000;
+    overflow: hidden;
+    height: 100%;
+    width: 100%;
+    font-family: 'Segoe UI', Arial, sans-serif;
+  }
+  #container {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+  }
+  video { display: none; }
+  canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  #status {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    color: #0f0;
+    font-family: monospace;
+    font-size: 12px;
+    background: rgba(0,0,0,0.5);
+    padding: 5px 9px;
+    border-radius: 6px;
+    z-index: 10;
+  }
+</style>
+</head>
+<body>
+
+<div id="container">
+  <video id="webcam" playsinline></video>
+  <canvas id="output"></canvas>
+  <div id="status">Iniciando câmera...</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+
+<script>
+const videoElement = document.getElementById('webcam');
+const canvasElement = document.getElementById('output');
+const canvasCtx = canvasElement.getContext('2d');
+const statusEl = document.getElementById('status');
+
+function resizeCanvas() {
+  canvasElement.width = window.innerWidth;
+  canvasElement.height = window.innerHeight;
+  layoutMenu();
+}
+window.addEventListener('resize', resizeCanvas);
+
+// ---------------------------------------------------------
+// MENU FLUTUANTE (estilo Meta Quest): barra com relógio e
+// ícones utilitários, MEIO da tela, boiando suavemente,
+// mais um botão de "Loja" separado. A câmera ao vivo fica
+// por trás de tudo (realidade mista).
+// ---------------------------------------------------------
+const UTILITY_ITEMS = [
+  { id: 'grid',     glyph: 'grid' },
+  { id: 'bell',     glyph: 'bell' },
+  { id: 'share',    glyph: 'share' },
+  { id: 'settings', glyph: 'settings' },
+];
+const STORE_ITEM = { id: 'loja', label: 'Loja', glyph: 'store', color: '#3C8CE6' };
+
+let buttons = [];
+let pill = { x: 0, y: 0, w: 0, h: 0 };
+let floatOffset = 0;
+
+function layoutMenu() {
+  buttons = [];
+
+  const pillH = canvasElement.height * 0.11;
+  const iconR = pillH * 0.30;
+  const gap = pillH * 1.35;
+  const n = UTILITY_ITEMS.length;
+  const iconsAreaW = gap * (n - 1);
+  const clockAreaW = pillH * 1.7;
+  const pillW = clockAreaW + iconsAreaW + pillH * 1.5;
+
+  const pillX = canvasElement.width * 0.5 - pillW * 0.55;
+  // FLUTUANDO NO MEIO DA TELA - nunca colado na borda de baixo
+  const pillY = canvasElement.height * 0.50 - pillH / 2;
+
+  pill = { x: pillX, y: pillY, w: pillW, h: pillH };
+
+  const startIconX = pillX + clockAreaW + iconR * 0.5;
+  const iconY = pillY + pillH / 2;
+
+  UTILITY_ITEMS.forEach((item, i) => {
+    buttons.push({
+      ...item, x: startIconX + i * gap, y: iconY, radius: iconR,
+      style: 'utility',
+      rotation: 0, hoverProgress: 0, scale: 1, lastTriggerTime: 0
+    });
+  });
+
+  const storeR = pillH * 0.62;
+  buttons.push({
+    ...STORE_ITEM,
+    x: pillX + pillW + storeR * 1.6,
+    y: iconY,
+    radius: storeR,
+    style: 'app',
+    rotation: 0, hoverProgress: 0, scale: 1, lastTriggerTime: 0
+  });
+}
+
+const HAND_CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],
+  [0,5],[5,6],[6,7],[7,8],
+  [5,9],[9,10],[10,11],[11,12],
+  [9,13],[13,14],[14,15],[15,16],
+  [13,17],[17,18],[18,19],[19,20],
+  [0,17]
+];
+
+const SMOOTHING = 0.5;
+let smoothedHands = [];
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function smoothLandmarks(rawHands) {
+  if (smoothedHands.length !== rawHands.length) {
+    smoothedHands = rawHands.map(hand => hand.map(p => ({ ...p })));
+    return smoothedHands;
+  }
+  for (let h = 0; h < rawHands.length; h++) {
+    for (let i = 0; i < rawHands[h].length; i++) {
+      const raw = rawHands[h][i];
+      const smooth = smoothedHands[h][i];
+      smooth.x = lerp(raw.x, smooth.x, SMOOTHING);
+      smooth.y = lerp(raw.y, smooth.y, SMOOTHING);
+    }
+  }
+  return smoothedHands;
+}
+
+function drawHandSkeleton(landmarks) {
+  canvasCtx.strokeStyle = 'rgba(0,255,136,0.6)';
+  canvasCtx.lineWidth = 3;
+  for (const [start, end] of HAND_CONNECTIONS) {
+    const p1 = landmarks[start];
+    const p2 = landmarks[end];
+    canvasCtx.beginPath();
+    canvasCtx.moveTo(p1.x * canvasElement.width, p1.y * canvasElement.height);
+    canvasCtx.lineTo(p2.x * canvasElement.width, p2.y * canvasElement.height);
+    canvasCtx.stroke();
+  }
+}
+
+function drawMenuAndCheckHover(fingerX, fingerY, isPinching, dt) {
+  for (const btn of buttons) {
+    const drawY = btn.y + floatOffset;
+    const dx = fingerX - btn.x;
+    const dy = fingerY - drawY;
+    const dist = Math.hypot(dx, dy);
+    const isHover = fingerX !== null && dist < btn.radius * 1.3;
+
+    if (isHover) {
+      btn.hoverProgress = Math.min(1, btn.hoverProgress + dt * 1.8);
+    } else {
+      btn.hoverProgress = Math.max(0, btn.hoverProgress - dt * 3);
+    }
+
+    const targetScale = isHover ? 1.15 : 1;
+    btn.scale = lerp(targetScale, btn.scale, Math.pow(0.001, dt));
+
+    const now = performance.now();
+    if (isHover && isPinching && now - btn.lastTriggerTime > 700) {
+      btn.lastTriggerTime = now;
+      onMenuButtonClick(btn);
+    }
+
+    drawButton(btn, isHover, drawY);
+  }
+}
+
+function drawDockPanel() {
+  const y = pill.y + floatOffset;
+  canvasCtx.save();
+  canvasCtx.shadowColor = 'rgba(0,0,0,0.5)';
+  canvasCtx.shadowBlur = 24;
+  canvasCtx.shadowOffsetY = 10;
+  canvasCtx.beginPath();
+  canvasCtx.roundRect
+    ? canvasCtx.roundRect(pill.x, y, pill.w, pill.h, pill.h / 2)
+    : canvasCtx.rect(pill.x, y, pill.w, pill.h);
+  canvasCtx.fillStyle = 'rgba(15,15,18,0.72)';
+  canvasCtx.fill();
+  canvasCtx.shadowBlur = 0;
+  canvasCtx.shadowOffsetY = 0;
+  canvasCtx.strokeStyle = 'rgba(255,255,255,0.10)';
+  canvasCtx.lineWidth = 1;
+  canvasCtx.stroke();
+
+  const sepX = pill.x + pill.h * 1.7;
+  canvasCtx.beginPath();
+  canvasCtx.moveTo(sepX, y + pill.h * 0.22);
+  canvasCtx.lineTo(sepX, y + pill.h * 0.78);
+  canvasCtx.strokeStyle = 'rgba(255,255,255,0.15)';
+  canvasCtx.lineWidth = 1.5;
+  canvasCtx.stroke();
+  canvasCtx.restore();
+}
+
+function drawClock() {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  const x = pill.x + pill.h * 0.85;
+  const y = pill.y + pill.h / 2 + floatOffset;
+
+  canvasCtx.save();
+  canvasCtx.font = `bold ${pill.h * 0.28}px sans-serif`;
+  canvasCtx.textAlign = 'center';
+  canvasCtx.textBaseline = 'middle';
+  canvasCtx.fillStyle = '#FFFFFF';
+  canvasCtx.fillText(`${hh}:${mm}`, x, y);
+  canvasCtx.restore();
+}
+
+function drawButton(btn, isHover, drawY) {
+  if (btn.style === 'utility') {
+    drawUtilityButton(btn, isHover, drawY);
+  } else {
+    drawAppButton(btn, isHover, drawY);
+  }
+}
+
+function drawUtilityButton(btn, isHover, drawY) {
+  const r = btn.radius * btn.scale;
+
+  canvasCtx.save();
+  canvasCtx.translate(btn.x, drawY);
+
+  if (isHover) {
+    canvasCtx.beginPath();
+    canvasCtx.arc(0, 0, r * 1.7, 0, 2 * Math.PI);
+    canvasCtx.fillStyle = 'rgba(255,255,255,0.14)';
+    canvasCtx.fill();
+  }
+
+  if (btn.hoverProgress > 0.01) {
+    canvasCtx.beginPath();
+    canvasCtx.arc(0, 0, r * 1.9, -Math.PI/2, -Math.PI/2 + btn.hoverProgress * 2 * Math.PI);
+    canvasCtx.strokeStyle = `rgba(255,255,255,${0.5 + btn.hoverProgress * 0.5})`;
+    canvasCtx.lineWidth = 2.5;
+    canvasCtx.lineCap = 'round';
+    canvasCtx.stroke();
+  }
+
+  canvasCtx.globalAlpha = 0.85 + btn.hoverProgress * 0.15;
+  drawGlyph(btn.glyph, r * 0.95);
+  canvasCtx.restore();
+}
+
+function drawAppButton(btn, isHover, drawY) {
+  const r = btn.radius * btn.scale;
+
+  canvasCtx.save();
+  canvasCtx.translate(btn.x, drawY);
+  canvasCtx.rotate(btn.rotation || 0);
+
+  canvasCtx.shadowColor = 'rgba(0,0,0,0.45)';
+  canvasCtx.shadowBlur = 14;
+  canvasCtx.shadowOffsetY = 6;
+
+  if (isHover) {
+    canvasCtx.shadowColor = btn.color;
+    canvasCtx.shadowBlur = 28;
+    canvasCtx.shadowOffsetY = 0;
+  }
+
+  const grad = canvasCtx.createLinearGradient(0, -r, 0, r);
+  grad.addColorStop(0, shadeColor(btn.color, 12));
+  grad.addColorStop(1, shadeColor(btn.color, -30));
+
+  canvasCtx.beginPath();
+  canvasCtx.roundRect
+    ? canvasCtx.roundRect(-r, -r, r * 2, r * 2, r * 0.38)
+    : canvasCtx.rect(-r, -r, r * 2, r * 2);
+  canvasCtx.fillStyle = grad;
+  canvasCtx.fill();
+
+  canvasCtx.shadowBlur = 0;
+  canvasCtx.shadowOffsetY = 0;
+
+  if (canvasCtx.roundRect) {
+    canvasCtx.beginPath();
+    canvasCtx.roundRect(-r * 0.7, -r * 0.82, r * 1.4, r * 0.45, r * 0.3);
+    canvasCtx.fillStyle = 'rgba(255,255,255,0.16)';
+    canvasCtx.fill();
+  }
+
+  if (btn.hoverProgress > 0.01) {
+    canvasCtx.beginPath();
+    canvasCtx.arc(0, 0, r + 9, -Math.PI/2, -Math.PI/2 + btn.hoverProgress * 2 * Math.PI);
+    canvasCtx.strokeStyle = `rgba(255,255,255,${0.5 + btn.hoverProgress * 0.5})`;
+    canvasCtx.lineWidth = 3.5;
+    canvasCtx.lineCap = 'round';
+    canvasCtx.stroke();
+  }
+
+  drawGlyph(btn.glyph, r * 0.5);
+  canvasCtx.restore();
+}
+
+function drawGlyph(type, s) {
+  canvasCtx.strokeStyle = '#FFFFFF';
+  canvasCtx.fillStyle = '#FFFFFF';
+  canvasCtx.lineWidth = s * 0.14;
+  canvasCtx.lineCap = 'round';
+  canvasCtx.lineJoin = 'round';
+
+  switch (type) {
+    case 'grid': {
+      const g = s * 0.55;
+      const o = s * 0.62;
+      [[-o,-o],[o,-o],[-o,o],[o,o]].forEach(([cx,cy]) => {
+        canvasCtx.beginPath();
+        canvasCtx.roundRect
+          ? canvasCtx.roundRect(cx-g/2, cy-g/2, g, g, g*0.25)
+          : canvasCtx.rect(cx-g/2, cy-g/2, g, g);
+        canvasCtx.fill();
+      });
+      break;
+    }
+    case 'bell': {
+      canvasCtx.beginPath();
+      canvasCtx.arc(0, -s*0.05, s*0.65, Math.PI, 2*Math.PI);
+      canvasCtx.lineTo(s*0.65, s*0.35);
+      canvasCtx.lineTo(-s*0.65, s*0.35);
+      canvasCtx.closePath();
+      canvasCtx.fill();
+      canvasCtx.beginPath();
+      canvasCtx.arc(0, s*0.55, s*0.18, 0, 2*Math.PI);
+      canvasCtx.fill();
+      break;
+    }
+    case 'share': {
+      canvasCtx.beginPath();
+      canvasCtx.arc(-s*0.75, 0, s*0.18, 0, 2*Math.PI);
+      canvasCtx.fill();
+      canvasCtx.beginPath();
+      canvasCtx.arc(s*0.75, -s*0.6, s*0.18, 0, 2*Math.PI);
+      canvasCtx.fill();
+      canvasCtx.beginPath();
+      canvasCtx.arc(s*0.75, s*0.6, s*0.18, 0, 2*Math.PI);
+      canvasCtx.fill();
+      canvasCtx.beginPath();
+      canvasCtx.moveTo(-s*0.7, 0);
+      canvasCtx.lineTo(s*0.68, -s*0.55);
+      canvasCtx.moveTo(-s*0.7, 0);
+      canvasCtx.lineTo(s*0.68, s*0.55);
+      canvasCtx.stroke();
+      break;
+    }
+    case 'settings': {
+      canvasCtx.beginPath();
+      canvasCtx.arc(0, 0, s*0.38, 0, 2*Math.PI);
+      canvasCtx.stroke();
+      for (let ang = 0; ang < 360; ang += 45) {
+        const a = ang * Math.PI / 180;
+        const x1 = Math.cos(a) * s*0.58, y1 = Math.sin(a) * s*0.58;
+        const x2 = Math.cos(a) * s*0.85, y2 = Math.sin(a) * s*0.85;
+        canvasCtx.beginPath();
+        canvasCtx.moveTo(x1, y1);
+        canvasCtx.lineTo(x2, y2);
+        canvasCtx.stroke();
+      }
+      break;
+    }
+    case 'store': {
+      canvasCtx.beginPath();
+      canvasCtx.moveTo(-s*0.9, -s*0.15);
+      canvasCtx.lineTo(-s*0.6, -s*0.75);
+      canvasCtx.lineTo(s*0.6, -s*0.75);
+      canvasCtx.lineTo(s*0.9, -s*0.15);
+      canvasCtx.closePath();
+      canvasCtx.fill();
+      canvasCtx.beginPath();
+      canvasCtx.roundRect
+        ? canvasCtx.roundRect(-s*0.7, -s*0.15, s*1.4, s*0.9, s*0.08)
+        : canvasCtx.rect(-s*0.7, -s*0.15, s*1.4, s*0.9);
+      canvasCtx.stroke();
+      canvasCtx.beginPath();
+      canvasCtx.roundRect
+        ? canvasCtx.roundRect(-s*0.22, s*0.2, s*0.44, s*0.55, s*0.06)
+        : canvasCtx.rect(-s*0.22, s*0.2, s*0.44, s*0.55);
+      canvasCtx.fill();
+      break;
+    }
+    default: {
+      canvasCtx.beginPath();
+      canvasCtx.arc(0, 0, s*0.6, 0, 2*Math.PI);
+      canvasCtx.fill();
+    }
+  }
+}
+
+function shadeColor(hex, percent) {
+  const num = parseInt(hex.replace('#',''), 16);
+  let r = (num >> 16) + percent;
+  let g = ((num >> 8) & 0x00FF) + percent;
+  let b = (num & 0x0000FF) + percent;
+  r = Math.min(255, Math.max(0, r));
+  g = Math.min(255, Math.max(0, g));
+  b = Math.min(255, Math.max(0, b));
+  return `rgb(${r},${g},${b})`;
+}
+
+function onMenuButtonClick(btn) {
+  statusEl.textContent = `Botão clicado: ${btn.id}`;
+  // >>> Edite aqui o que cada botão faz <<<
+}
+
+function drawCursor(x, y, isPinching) {
+  canvasCtx.beginPath();
+  canvasCtx.arc(x, y, isPinching ? 14 : 10, 0, 2 * Math.PI);
+  canvasCtx.strokeStyle = isPinching ? '#00FFFF' : '#FFFFFF';
+  canvasCtx.lineWidth = 3;
+  canvasCtx.stroke();
+  if (isPinching) {
+    canvasCtx.beginPath();
+    canvasCtx.arc(x, y, 5, 0, 2 * Math.PI);
+    canvasCtx.fillStyle = '#00FFFF';
+    canvasCtx.fill();
+  }
+}
+
+let latestVideoFrame = null;
+let latestResults = [];
+let lastLoopTime = performance.now();
+
+function onResults(results) {
+  latestVideoFrame = results.image;
+  latestResults = results.multiHandLandmarks || [];
+}
+
+function renderLoop() {
+  const now = performance.now();
+  const dt = Math.min(0.1, (now - lastLoopTime) / 1000);
+  lastLoopTime = now;
+
+  if (latestVideoFrame) {
+    canvasCtx.save();
+    canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+    canvasCtx.drawImage(latestVideoFrame, 0, 0, canvasElement.width, canvasElement.height);
+
+    let fingerX = null, fingerY = null, isPinching = false;
+
+    if (latestResults.length > 0) {
+      const smoothed = smoothLandmarks(latestResults);
+      const hand = smoothed[0];
+
+      drawHandSkeleton(hand);
+
+      const indexTip = hand[8];
+      const thumbTip = hand[4];
+      fingerX = indexTip.x * canvasElement.width;
+      fingerY = indexTip.y * canvasElement.height;
+
+      const pinchDist = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
+      isPinching = pinchDist < 0.055;
+
+      statusEl.textContent = isPinching ? 'Pinça ativa' : 'Aponte o indicador pro botão e feche a pinça';
+    } else {
+      smoothedHands = [];
+      statusEl.textContent = 'Nenhuma mão detectada';
+    }
+
+    const floatAmplitude = pill.h * 0.10;
+    floatOffset = Math.sin(now * 0.0012) * floatAmplitude;
+
+    drawDockPanel();
+    drawClock();
+    drawMenuAndCheckHover(fingerX, fingerY, isPinching, dt);
+
+    if (fingerX !== null) {
+      drawCursor(fingerX, fingerY, isPinching);
+    }
+
+    canvasCtx.restore();
+  }
+  requestAnimationFrame(renderLoop);
+}
+
+resizeCanvas();
+requestAnimationFrame(renderLoop);
+
+const hands = new Hands({
+  locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+});
+
+hands.setOptions({
+  maxNumHands: 1,
+  modelComplexity: 0,
+  minDetectionConfidence: 0.6,
+  minTrackingConfidence: 0.5
+});
+
+hands.onResults(onResults);
+
+const camera = new Camera(videoElement, {
+  onFrame: async () => { await hands.send({ image: videoElement }); },
+  width: 640,
+  height: 480,
+  facingMode: 'environment'
+});
+
+camera.start()
+  .then(() => { statusEl.textContent = 'Câmera iniciada.'; })
+  .catch((err) => { statusEl.textContent = 'Erro na câmera: ' + err.message; });
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+</script>
+
+</body>
+</html>
